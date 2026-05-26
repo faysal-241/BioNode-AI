@@ -1,80 +1,73 @@
 import streamlit as st
 from neo4j import GraphDatabase
 import pandas as pd
+import plotly.express as px
 
-# Neo4j ক্লাউড ডেটাবেসের তথ্য (আপনার সিক্রেটস ফাইল থেকে আসবে)
+# Neo4j ক্লাউড ডেটাবেসের তথ্য
 URI = st.secrets["NEO4J_URI"]
 
 # সাইডবার মেনু
 st.sidebar.title("Navigation")
 menu = st.sidebar.radio("", ["Dashboard", "Data Entry", "AI Alerts"])
 
-# ১. মেইন ড্যাশবোর্ড পেজ (Dashboard)
+# ১. মেইন ড্যাশবোর্ড পেজ (Live Heatmap for Cloud)
 if menu == "Dashboard":
-    st.title("📊 Hospital Analytics Dashboard")
+    st.title("📊 Live Epidemic Dashboard (Cloud)")
     st.markdown("---")
     
-    with st.spinner("Loading live data from Neo4j..."):
+    with st.spinner("Fetching live geospatial data..."):
         try:
             driver = GraphDatabase.driver(URI, auth=(st.secrets["NEO4J_USERNAME"], st.secrets["NEO4J_PASSWORD"]))
             with driver.session() as session:
+                # মোট রোগীর সংখ্যা
                 total_patients = session.run("MATCH (p:Patient) RETURN count(p) AS total").single()["total"]
-                result = session.run("MATCH (p:Patient) RETURN p.symptoms AS Symptom, count(p) AS Count")
-                symptom_data = pd.DataFrame([record.data() for record in result])
+                
+                # হাই-রিস্ক জোন
+                outbreak_query = session.run("MATCH (p:Patient) WITH p.location AS loc, count(p) AS cases WHERE cases >= 2 RETURN count(loc) AS total_outbreaks")
+                active_outbreaks = outbreak_query.single()["total_outbreaks"]
+                
+                # ম্যাপের ডেটা (এখানে symptom একবচনে ফিক্স করা হয়েছে)
+                map_result = session.run("MATCH (p:Patient) WHERE p.latitude IS NOT NULL RETURN p.latitude AS lat, p.longitude AS lon, p.location AS location, p.symptom AS symptom")
+                map_data = pd.DataFrame([record.data() for record in map_result])
             driver.close()
             
-            st.metric(label="Total Patients Today", value=total_patients)
+            # KPI কার্ডস
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(label="Total Outbreak Cases", value=total_patients, delta="Live Data")
+            with col2:
+                st.metric(label="High Risk Zones", value=active_outbreaks, delta="Alerts Active", delta_color="inverse")
+            with col3:
+                st.metric(label="BioNode AI Status", value="Secured", delta="Local Offline Mode")
+                
             st.markdown("---")
             
-            if not symptom_data.empty:
-                st.subheader("📈 Disease Spread (By Symptoms)")
-                chart_data = symptom_data.set_index("Symptom")
-                st.bar_chart(chart_data)
+            # হিটম্যাপ লজিক
+            if not map_data.empty:
+                st.subheader("🔥 Live Geospatial Infection Heatmap")
+                
+                fig = px.density_mapbox(
+                    map_data, lat='lat', lon='lon', z=[1]*len(map_data), radius=45, 
+                    center=dict(lat=22.7010, lon=90.3535), zoom=8.5, 
+                    mapbox_style="carto-darkmatter", color_continuous_scale="YlOrRd", 
+                    hover_name="location", hover_data={"lat": False, "lon": False, "symptom": True}
+                )
+                fig.update_layout(height=650, margin={"r":0,"t":0,"l":0,"b":0}, coloraxis_showscale=False)
+                st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
             else:
-                st.info("No data available yet. Please add patients from the Data Entry page.")
+                st.info("🗺️ No map data available yet.")
+                
         except Exception as e:
             st.error("❌ Database connection error.")
             st.write(e)
 
-# ২. ডেটা এন্ট্রি পেজ (Data Entry)
+# ২. ডেটা এন্ট্রি পেজ (Showcase Version)
 elif menu == "Data Entry":
     st.title("📝 Enter New Patient Data")
-    st.markdown("---")
-    
-    with st.form("patient_form"):
-        name = st.text_input("Patient Name")
-        age = st.number_input("Age", min_value=0, max_value=120)
-        location = st.selectbox("Location", ["Barishal Sadar", "Bakerganj", "Babuganj", "Wazirpur", "Banaripara"])
-        symptoms = st.selectbox("Primary Symptom", ["Fever", "Cough", "Vomiting", "Body Ache", "Headache"])
-        
-        submitted = st.form_submit_button("Save to Cloud Database")
-        
-        if submitted:
-            try:
-                driver = GraphDatabase.driver(URI, auth=(st.secrets["NEO4J_USERNAME"], st.secrets["NEO4J_PASSWORD"]))
-                with driver.session() as session:
-                    session.run(
-                        "CREATE (p:Patient {name: $name, age: $age, location: $location, symptoms: $symptoms})",
-                        name=name, age=age, location=location, symptoms=symptoms
-                    )
-                driver.close()
-                st.success(f"✅ Data for {name} saved successfully to Neo4j Cloud!")
-            except Exception as e:
-                st.error("❌ Failed to save data.")
-                st.write(e)
+    st.info("💡 For the full strict validation module, please see the local offline version.")
 
-# ৩. এআই অ্যালার্ট পেজ (AI Alerts - For Showcase)
+# ৩. এআই অ্যালার্ট পেজ (Showcase Version)
 elif menu == "AI Alerts":
     st.title("🤖 BioNode AI - Security Protocol")
-    st.markdown("---")
-    
     st.warning("🔒 **Strict Data Privacy Protocol Active**")
-    st.write("""
-    To ensure the absolute privacy and security of patient data, our core AI engine (**Llama 3**) operates entirely offline within a secure local server. 
-    
-    Due to medical data compliance (HIPAA), the AI analysis module cannot be exposed to public cloud servers.
-    """)
-    st.info("💡 **Judges / Reviewers:** To see the live offline AI analysis in action, please watch the demonstration video linked below.")
-    
-    # এখানে আপনি আপনার তৈরি করা ডেমো ভিডিওর লিংক দেবেন
-    st.markdown("[▶️ Watch the Live Offline AI Demonstration Here](https://your-video-link-here.com)")
+    st.write("Due to medical data compliance, our core Predictive AI engine (Llama 3) operates entirely offline. It cannot be exposed to this public cloud link.")
