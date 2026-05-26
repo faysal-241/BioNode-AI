@@ -2,36 +2,48 @@ import streamlit as st
 from neo4j import GraphDatabase
 import pandas as pd
 import plotly.express as px
+import datetime
 
-# Neo4j ক্লাউড ডেটাবেসের তথ্য
+# Neo4j ক্লাউড ডেটাবেসের কানেকশন
 URI = st.secrets["NEO4J_URI"]
+USERNAME = st.secrets["NEO4J_USERNAME"]
+PASSWORD = st.secrets["NEO4J_PASSWORD"]
 
-# সাইডবার মেনু
+# হিটম্যাপের জন্য বরিশাল জেলার জিপিএস (GPS) ডেটা
+GPS_DATA = {
+    "Barishal Sadar": {"lat": 22.7010, "lon": 90.3535},
+    "Bakerganj": {"lat": 22.5528, "lon": 90.3344},
+    "Babuganj": {"lat": 22.8333, "lon": 90.3000},
+    "Wazirpur": {"lat": 22.8167, "lon": 90.2333},
+    "Banaripara": {"lat": 22.7833, "lon": 90.1667},
+    "Agailjhara": {"lat": 22.9667, "lon": 90.1500},
+    "Gournadi": {"lat": 22.9736, "lon": 90.2264},
+    "Hizla": {"lat": 22.9000, "lon": 90.5167},
+    "Mehendiganj": {"lat": 22.8250, "lon": 90.5333},
+    "Muladi": {"lat": 22.9167, "lon": 90.4167}
+}
+
 st.sidebar.title("Navigation")
-menu = st.sidebar.radio("", ["Dashboard", "Data Entry", "AI Alerts"])
+menu = st.sidebar.radio("", ["Dashboard", "Strict Data Entry", "AI Alerts"])
 
-# ১. মেইন ড্যাশবোর্ড পেজ (Live Heatmap for Cloud)
+# ১. মেইন ড্যাশবোর্ড
 if menu == "Dashboard":
     st.title("📊 Live Epidemic Dashboard (Cloud)")
     st.markdown("---")
     
     with st.spinner("Fetching live geospatial data..."):
         try:
-            driver = GraphDatabase.driver(URI, auth=(st.secrets["NEO4J_USERNAME"], st.secrets["NEO4J_PASSWORD"]))
+            driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD))
             with driver.session() as session:
-                # মোট রোগীর সংখ্যা
                 total_patients = session.run("MATCH (p:Patient) RETURN count(p) AS total").single()["total"]
                 
-                # হাই-রিস্ক জোন
                 outbreak_query = session.run("MATCH (p:Patient) WITH p.location AS loc, count(p) AS cases WHERE cases >= 2 RETURN count(loc) AS total_outbreaks")
                 active_outbreaks = outbreak_query.single()["total_outbreaks"]
                 
-                # ম্যাপের ডেটা (এখানে symptom একবচনে ফিক্স করা হয়েছে)
                 map_result = session.run("MATCH (p:Patient) WHERE p.latitude IS NOT NULL RETURN p.latitude AS lat, p.longitude AS lon, p.location AS location, p.symptom AS symptom")
                 map_data = pd.DataFrame([record.data() for record in map_result])
             driver.close()
             
-            # KPI কার্ডস
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric(label="Total Outbreak Cases", value=total_patients, delta="Live Data")
@@ -42,10 +54,8 @@ if menu == "Dashboard":
                 
             st.markdown("---")
             
-            # হিটম্যাপ লজিক
             if not map_data.empty:
                 st.subheader("🔥 Live Geospatial Infection Heatmap")
-                
                 fig = px.density_mapbox(
                     map_data, lat='lat', lon='lon', z=[1]*len(map_data), radius=45, 
                     center=dict(lat=22.7010, lon=90.3535), zoom=8.5, 
@@ -61,13 +71,75 @@ if menu == "Dashboard":
             st.error("❌ Database connection error.")
             st.write(e)
 
-# ২. ডেটা এন্ট্রি পেজ (Showcase Version)
-elif menu == "Data Entry":
-    st.title("📝 Enter New Patient Data")
-    st.info("💡 For the full strict validation module, please see the local offline version.")
+# ২. সিকিউরড ডেটা এন্ট্রি (এখন ক্লাউডেও কাজ করবে)
+elif menu == "Strict Data Entry":
+    st.title("📝 Secure Clinical Data Entry")
+    st.markdown("---")
+    
+    st.info("💡 **Operator Input:** Select the map location step-by-step and enter patient details.")
+    
+    st.subheader("1. Patient Age")
+    patient_age = st.number_input("Select Age", min_value=1, max_value=120, step=1)
+    
+    st.markdown("---")
+    st.subheader("2. Map Location (Deep Filtering)")
+    patient_location = "Select Area..." 
+    
+    division = st.selectbox("Division", ["Select Division...", "Barishal"])
+    if division == "Barishal":
+        district = st.selectbox("District", ["Select District...", "Barishal"])
+        if district == "Barishal":
+            patient_location = st.selectbox("Upazila / Area", ["Select Area...", "Barishal Sadar", "Bakerganj", "Babuganj", "Wazirpur", "Banaripara", "Agailjhara", "Gournadi", "Hizla", "Mehendiganj", "Muladi"])
+            
+    st.markdown("---")
+    st.subheader("3. Clinical Symptoms")
+    patient_symptom = st.text_input("Enter Symptoms or Disease (e.g., Fever, Red rash)")
+    
+    if st.button("Validate & Save to Cloud"):
+        errors = []
+        if patient_location == "Select Area...":
+            errors.append("Map Location Error: You must select the deep location.")
+            
+        forbidden_locations_in_symptom = ["barishal", "bakerganj", "babuganj", "wazirpur", "banaripara", "agailjhara", "gournadi", "hizla", "mehendiganj", "muladi", "dhaka"]
+        if any(loc in patient_symptom.lower() for loc in forbidden_locations_in_symptom):
+            errors.append("Wrong Input! You typed a map location in the Disease box.")
+            
+        if not patient_symptom.strip():
+            errors.append("Symptom box cannot be empty.")
+        elif any(char.isdigit() for char in patient_symptom):
+            errors.append("Wrong Input! You cannot put numbers in the Disease box.")
+            
+        if errors:
+            for error in errors:
+                st.error(f"❌ {error}")
+        else:
+            with st.spinner("Saving data to the cloud..."):
+                try:
+                    patient_lat = GPS_DATA[patient_location]["lat"]
+                    patient_lon = GPS_DATA[patient_location]["lon"]
+                    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD))
+                    with driver.session() as session:
+                        session.run(
+                            """
+                            CREATE (p:Patient {
+                                age: $age, location: $location, symptom: $symptom, 
+                                latitude: $lat, longitude: $lon, timestamp: $time
+                            })
+                            """,
+                            age=patient_age, location=patient_location, symptom=patient_symptom, 
+                            lat=patient_lat, lon=patient_lon, time=current_time
+                        )
+                    driver.close()
+                    st.success(f"✅ Data for {patient_location} successfully saved!")
+                except Exception as e:
+                    st.error("❌ Database connection error.")
+                    st.write(e)
 
 # ৩. এআই অ্যালার্ট পেজ (Showcase Version)
 elif menu == "AI Alerts":
     st.title("🤖 BioNode AI - Security Protocol")
+    st.markdown("---")
     st.warning("🔒 **Strict Data Privacy Protocol Active**")
-    st.write("Due to medical data compliance, our core Predictive AI engine (Llama 3) operates entirely offline. It cannot be exposed to this public cloud link.")
+    st.write("Due to medical data compliance (HIPAA), our core Predictive AI engine (Llama 3) operates entirely offline on the local server. It cannot be exposed to this public cloud link.")
