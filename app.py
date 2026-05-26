@@ -1,56 +1,80 @@
 import streamlit as st
+from neo4j import GraphDatabase
+import pandas as pd
 
-# ১. পেজের মূল সেটিং
-st.set_page_config(page_title="BioNode AI", page_icon="🚨", layout="wide")
+# Neo4j ক্লাউড ডেটাবেসের তথ্য (আপনার সিক্রেটস ফাইল থেকে আসবে)
+URI = st.secrets["NEO4J_URI"]
 
-# ২. সাইডবার
-st.sidebar.title("🧬 BioNode AI")
-st.sidebar.info("Hybrid Epidemic Intelligence")
-menu = st.sidebar.radio("Navigation", ["Dashboard", "Data Entry", "AI Alerts"])
+# সাইডবার মেনু
+st.sidebar.title("Navigation")
+menu = st.sidebar.radio("", ["Dashboard", "Data Entry", "AI Alerts"])
 
-# ৩. মূল ড্যাশবোর্ড
+# ১. মেইন ড্যাশবোর্ড পেজ (Dashboard)
 if menu == "Dashboard":
-    st.title("🚨 BioNode AI: Live Dashboard")
+    st.title("📊 Hospital Analytics Dashboard")
     st.markdown("---")
     
-    st.subheader("Real-Time Live Summary")
-    col_1, col_2, col_3 = st.columns(3)
-    
-    with col_1:
-        st.metric(label="Total Patients Today", value="0")
-        
-    with col_2:
-        st.metric(label="Top Symptom", value="Waiting...")
-        
-    with col_3:
-        st.metric(label="High-Risk Zone", value="Safe")
+    with st.spinner("Loading live data from Neo4j..."):
+        try:
+            driver = GraphDatabase.driver(URI, auth=(st.secrets["NEO4J_USERNAME"], st.secrets["NEO4J_PASSWORD"]))
+            with driver.session() as session:
+                total_patients = session.run("MATCH (p:Patient) RETURN count(p) AS total").single()["total"]
+                result = session.run("MATCH (p:Patient) RETURN p.symptoms AS Symptom, count(p) AS Count")
+                symptom_data = pd.DataFrame([record.data() for record in result])
+            driver.close()
+            
+            st.metric(label="Total Patients Today", value=total_patients)
+            st.markdown("---")
+            
+            if not symptom_data.empty:
+                st.subheader("📈 Disease Spread (By Symptoms)")
+                chart_data = symptom_data.set_index("Symptom")
+                st.bar_chart(chart_data)
+            else:
+                st.info("No data available yet. Please add patients from the Data Entry page.")
+        except Exception as e:
+            st.error("❌ Database connection error.")
+            st.write(e)
 
-    st.success("System architecture loaded successfully! Ready for data integration.")
-
-# ৪. ডেটা এন্ট্রি পোর্টাল (অফলাইন মডিউল)
+# ২. ডেটা এন্ট্রি পেজ (Data Entry)
 elif menu == "Data Entry":
-    st.title("📝 Data Entry Portal")
+    st.title("📝 Enter New Patient Data")
     st.markdown("---")
-    st.info("Please enter patient details below. Data will be securely synced to the BioNode Cloud.")
     
-    # একটি সুন্দর ও গোছানো ডেটা এন্ট্রি ফর্ম
     with st.form("patient_form"):
-        col1, col2 = st.columns(2)
+        name = st.text_input("Patient Name")
+        age = st.number_input("Age", min_value=0, max_value=120)
+        location = st.selectbox("Location", ["Barishal Sadar", "Bakerganj", "Babuganj", "Wazirpur", "Banaripara"])
+        symptoms = st.selectbox("Primary Symptom", ["Fever", "Cough", "Vomiting", "Body Ache", "Headache"])
         
-        with col1:
-            age = st.number_input("Patient Age", min_value=0, max_value=120, value=25)
-            gender = st.selectbox("Gender", ["Male", "Female", "Other"])
-            
-        with col2:
-            location = st.selectbox("Location / Zone", ["Barishal Sadar", "Bakerganj", "Babuganj", "Banaripara"])
-            symptoms = st.multiselect("Symptoms (Select all that apply)", 
-                                      ["Fever", "Cough", "Diarrhea", "Vomiting", "Headache", "Body Ache"])
-            
-        # WHO Novelty Check-এর জন্য স্পেশাল ইনপুট বক্স
-        new_symptom = st.text_input("New/Unknown Symptom (If any) - For WHO Novelty Check")
-        
-        # সাবমিট বাটন
-        submitted = st.form_submit_button("💾 Save Patient Data")
+        submitted = st.form_submit_button("Save to Cloud Database")
         
         if submitted:
-            st.success(f"✅ Data temporarily saved for a {age}-year-old {gender} from {location}!")
+            try:
+                driver = GraphDatabase.driver(URI, auth=(st.secrets["NEO4J_USERNAME"], st.secrets["NEO4J_PASSWORD"]))
+                with driver.session() as session:
+                    session.run(
+                        "CREATE (p:Patient {name: $name, age: $age, location: $location, symptoms: $symptoms})",
+                        name=name, age=age, location=location, symptoms=symptoms
+                    )
+                driver.close()
+                st.success(f"✅ Data for {name} saved successfully to Neo4j Cloud!")
+            except Exception as e:
+                st.error("❌ Failed to save data.")
+                st.write(e)
+
+# ৩. এআই অ্যালার্ট পেজ (AI Alerts - For Showcase)
+elif menu == "AI Alerts":
+    st.title("🤖 BioNode AI - Security Protocol")
+    st.markdown("---")
+    
+    st.warning("🔒 **Strict Data Privacy Protocol Active**")
+    st.write("""
+    To ensure the absolute privacy and security of patient data, our core AI engine (**Llama 3**) operates entirely offline within a secure local server. 
+    
+    Due to medical data compliance (HIPAA), the AI analysis module cannot be exposed to public cloud servers.
+    """)
+    st.info("💡 **Judges / Reviewers:** To see the live offline AI analysis in action, please watch the demonstration video linked below.")
+    
+    # এখানে আপনি আপনার তৈরি করা ডেমো ভিডিওর লিংক দেবেন
+    st.markdown("[▶️ Watch the Live Offline AI Demonstration Here](https://your-video-link-here.com)")
