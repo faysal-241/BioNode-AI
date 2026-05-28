@@ -3,11 +3,15 @@ from neo4j import GraphDatabase
 import pandas as pd
 import plotly.express as px
 import datetime
+from groq import Groq  # নতুন এআই প্যাকেজ যোগ করা হলো
 
 # Neo4j ক্লাউড ডেটাবেসের কানেকশন
 URI = st.secrets["NEO4J_URI"]
 USERNAME = st.secrets["NEO4J_USERNAME"]
 PASSWORD = st.secrets["NEO4J_PASSWORD"]
+
+# Groq API ক্লায়েন্ট সেটআপ (এখানে আপনার নোটপ্যাডের চাবিটি বসান)
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # হিটম্যাপের জন্য বরিশাল জেলার জিপিএস (GPS) ডেটা
 GPS_DATA = {
@@ -50,7 +54,7 @@ if menu == "Dashboard":
             with col2:
                 st.metric(label="High Risk Zones", value=active_outbreaks, delta="Alerts Active", delta_color="inverse")
             with col3:
-                st.metric(label="BioNode AI Status", value="Secured", delta="Local Offline Mode")
+                st.metric(label="BioNode AI Status", value="Cloud Active", delta="Groq Llama 3")
                 
             st.markdown("---")
             
@@ -137,9 +141,40 @@ elif menu == "Strict Data Entry":
                     st.error("❌ Database connection error.")
                     st.write(e)
 
-# ৩. এআই অ্যালার্ট পেজ (Showcase Version)
+# ৩. এআই অ্যালার্ট পেজ (Groq Cloud AI Version)
 elif menu == "AI Alerts":
-    st.title("🤖 BioNode AI - Security Protocol")
+    st.title("🤖 BioNode AI - Live Outbreak Analysis")
     st.markdown("---")
-    st.warning("🔒 **Strict Data Privacy Protocol Active**")
-    st.write("Due to medical data compliance (HIPAA), our core Predictive AI engine (Llama 3) operates entirely offline on the local server. It cannot be exposed to this public cloud link.")
+    st.info("🧠 Analyzing live epidemiological data from the cloud using Llama-3 (Groq API)...")
+    
+    if st.button("Generate Live AI Alert"):
+        with st.spinner("BioNode AI is analyzing data..."):
+            try:
+                # ১. ডেটাবেস থেকে সর্বশেষ ডেটা আনা
+                driver = GraphDatabase.driver(URI, auth=(USERNAME, PASSWORD))
+                with driver.session() as session:
+                    # সর্বশেষ ১৫ জন রোগীর ডেটা এআই-কে দেওয়ার জন্য আনছি
+                    result = session.run("MATCH (p:Patient) RETURN p.location AS location, p.symptom AS symptom, p.age AS age ORDER BY p.timestamp DESC LIMIT 15")
+                    recent_cases = [record.data() for record in result]
+                driver.close()
+                
+                if not recent_cases:
+                    st.warning("No data found in the database to analyze.")
+                else:
+                    # ২. এআই-এর জন্য প্রম্পট (নির্দেশনা) তৈরি
+                    prompt_text = f"You are an expert Epidemiologist AI. Analyze these recent patient cases from Barishal region: {recent_cases}. Write a short, highly professional medical alert summarizing the active outbreak trends and give 2 quick safety recommendations. Keep it under 4-5 sentences."
+                    
+                    # ৩. Groq API-কে কল করে উত্তর নিয়ে আসা
+                    chat_completion = client.chat.completions.create(
+                        messages=[{"role": "user", "content": prompt_text}],
+                        model="llama3-8b-8192", 
+                    )
+                    ai_response = chat_completion.choices[0].message.content
+                    
+                    # ৪. স্ক্রিনে আউটপুট দেখানো
+                    st.subheader("🚨 Real-time AI Outbreak Report")
+                    st.write(ai_response)
+                    
+            except Exception as e:
+                st.error("❌ Failed to connect with AI or Database.")
+                st.write(e)
