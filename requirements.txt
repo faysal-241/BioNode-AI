@@ -2,3 +2,4 @@ streamlit
 pandas
 plotly
 neo4j
+groq
