@@ -45,6 +45,60 @@ def get_time_threshold(filter_option):
     threshold = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     return threshold
 
+# Pre-aggregate patient data for optimal LLM prompt structure
+def aggregate_data_for_ai(cases):
+    if not cases:
+        return "No active case records found."
+    
+    df = pd.DataFrame(cases)
+    df['dt'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    now = datetime.datetime.now()
+    threshold_15d = now - datetime.timedelta(days=15)
+    
+    grouped = []
+    for loc, group in df.groupby('location'):
+        total_cases = len(group)
+        symptom_counts = group['symptom'].value_counts().to_dict()
+        symptom_str = ", ".join(f"{sym} ({count} cases)" for sym, count in symptom_counts.items())
+        
+        ages = pd.to_numeric(group['age'], errors='coerce').dropna()
+        age_str = f"Avg Age: {int(ages.mean())} (Min: {int(ages.min())}, Max: {int(ages.max())})" if not ages.empty else "N/A"
+        
+        if 'dt' in group.columns and not group['dt'].isnull().all():
+            recent_count = sum(group['dt'] >= threshold_15d)
+            older_count = sum(group['dt'] < threshold_15d)
+            if older_count == 0 and recent_count > 0:
+                trend = "New Outbreak (Emerging)"
+            elif recent_count > older_count:
+                trend = f"Increasing (Last 15 days: {recent_count} vs Prior 15 days: {older_count})"
+            elif recent_count < older_count:
+                trend = f"Decreasing (Last 15 days: {recent_count} vs Prior 15 days: {older_count})"
+            else:
+                trend = f"Stable (Last 15 days: {recent_count} vs Prior 15 days: {older_count})"
+        else:
+            trend = "N/A"
+            
+        grouped.append({
+            'location': loc,
+            'total_cases': total_cases,
+            'symptoms': symptom_str,
+            'age_info': age_str,
+            'trend': trend
+        })
+        
+    summary_lines = []
+    summary_lines.append(f"### Epidemiological Summary (Total Active Cases: {len(df)})\n")
+    for idx, item in enumerate(grouped, 1):
+        summary_lines.append(
+            f"**{idx}. Location: {item['location']}**\n"
+            f"   - Total Cases: {item['total_cases']}\n"
+            f"   - Active Symptoms: {item['symptoms']}\n"
+            f"   - Patient Demographics: {item['age_info']}\n"
+            f"   - 30-Day Trend Indicator: {item['trend']}\n"
+        )
+        
+    return "\n".join(summary_lines)
+
 st.sidebar.title("Navigation")
 menu = st.sidebar.radio("", ["Dashboard", "Strict Data Entry", "AI Alerts"])
 
@@ -57,7 +111,7 @@ if menu == "Dashboard":
 
 # ১. মেইন ড্যাশবোর্ড
 if menu == "Dashboard":
-    st.title("📊 Live Epidemic Dashboard")
+    st.title("📊 Live Epidemic Dashboard (Local)")
     st.markdown("---")
     
     with st.spinner("Fetching live geospatial data..."):
@@ -93,21 +147,46 @@ if menu == "Dashboard":
             st.markdown("---")
             
             if not map_data.empty:
+                # Group by location to compute counts and join unique symptoms
+                map_data_grouped = map_data.groupby('location').agg({
+                    'lat': 'first',
+                    'lon': 'first',
+                    'symptom': lambda x: ", ".join(sorted(list(set(s for s in x if s)))),
+                }).reset_index()
+                
+                # Add case count
+                location_counts = map_data['location'].value_counts().to_dict()
+                map_data_grouped['case_count'] = map_data_grouped['location'].map(location_counts)
+                
                 st.subheader("🔥 Live Geospatial Infection Heatmap")
-                mean_lat = map_data['lat'].mean()
-                mean_lon = map_data['lon'].mean()
-                lat_span = map_data['lat'].max() - map_data['lat'].min()
-                lon_span = map_data['lon'].max() - map_data['lon'].min()
+                mean_lat = map_data_grouped['lat'].mean()
+                mean_lon = map_data_grouped['lon'].mean()
+                lat_span = map_data_grouped['lat'].max() - map_data_grouped['lat'].min()
+                lon_span = map_data_grouped['lon'].max() - map_data_grouped['lon'].min()
                 zoom_level = 6.2 if (lat_span > 1.5 or lon_span > 1.5) else 8.5
                 
                 fig = px.density_mapbox(
-                    map_data, lat='lat', lon='lon', z=[1]*len(map_data), radius=40, 
+                    map_data_grouped, lat='lat', lon='lon', z='case_count', radius=40, 
                     center=dict(lat=mean_lat, lon=mean_lon), zoom=zoom_level, 
                     mapbox_style="carto-darkmatter", color_continuous_scale="YlOrRd", 
-                    hover_name="location", hover_data={"lat": False, "lon": False, "symptom": True}
+                    hover_name="location", hover_data={"lat": False, "lon": False, "symptom": True, "case_count": True}
                 )
                 fig.update_layout(height=650, margin={"r":0,"t":0,"l":0,"b":0}, coloraxis_showscale=False)
                 st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+                
+                # Add Active Outbreaks Table / Hotline Metrics
+                st.markdown("---")
+                st.subheader("📍 Active Outbreak Hotspots")
+                hotspot_df = map_data_grouped[map_data_grouped['case_count'] >= 2].sort_values(by='case_count', ascending=False)
+                if not hotspot_df.empty:
+                    display_df = hotspot_df[['location', 'case_count', 'symptom']].rename(columns={
+                        'location': 'Location (Upazila)',
+                        'case_count': 'Total Active Cases',
+                        'symptom': 'Symptoms Present'
+                    })
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                else:
+                    st.success("✅ No active high-risk hotspots (locations with 2 or more cases) in this timeframe.")
             else:
                 st.info("🗺️ No map data available yet for the selected timeframe.")
                 
@@ -255,10 +334,18 @@ elif menu == "AI Alerts":
                     if is_fallback:
                         st.warning("⚠️ Note: No active cases found in the last 30 days. Fallback mode: analyzing the last 30 database records.")
                     
+                    # Pre-aggregate data in Python to present clean structured metrics to the AI
+                    structured_summary = aggregate_data_for_ai(recent_cases)
+                    
+                    with st.expander("📊 View Pre-Aggregated Database Statistics passed to AI"):
+                        st.markdown(structured_summary)
+                    
                     # ২. এআই-এর জন্য প্রম্পট (JSON রেসপন্স ফরম্যাটের নির্দেশনা) তৈরি
                     prompt_text = f"""
                     You are an expert Epidemiologist AI.
-                    Analyze these recent patient cases from Bangladesh: {recent_cases}.
+                    Here is a pre-aggregated structured epidemiological summary of active patient cases in Bangladesh:
+                    
+                    {structured_summary}
                     
                     Return a JSON object containing an epidemiological alert and risk assessment.
                     The JSON must strictly match the following schema:
@@ -269,18 +356,21 @@ elif menu == "AI Alerts":
                           "disease": "Summarized disease/symptom (e.g. Dengue, Cholera, Influenza-like illness)",
                           "risk_level": "High" or "Medium" or "Low",
                           "case_count": number_of_cases,
-                          "spreading_outlook": "Short description of potential spread"
+                          "spreading_outlook": "Short description of potential spread based on the Weekly Trend Indicator"
                         }}
                       ],
-                      "overall_summary": "A professional 3-sentence summary of the current active outbreak trends based on the provided data.",
+                      "overall_summary": "A professional 3-sentence summary of the active outbreak trends and threat level in the country based on the pre-aggregated weekly trends.",
                       "safety_recommendations": [
-                        "Specific action recommendation 1",
-                        "Specific action recommendation 2"
+                        "Specific clinical action recommendation 1",
+                        "Specific clinical action recommendation 2"
                       ]
                     }}
                     
-                    Analyze the data over the timeframe provided. Focus on identifying disease clusters in same location.
-                    Assign Risk Level based on cluster size and disease severity (e.g. high cases of fever/rash in same location = High Risk).
+                    Analyze the data over the timeframe provided. Focus on identifying disease clusters in the same location.
+                    Enforce strict epidemiological reasoning to assign risk levels:
+                    - HIGH RISK: Locations with Increasing trend, emerging new outbreaks of infectious symptoms, or large clusters (>=3 cases).
+                    - MEDIUM RISK: Stable clusters or moderate case counts.
+                    - LOW RISK: Decreasing trends or isolated single cases.
                     """
                     
                     # ৩. Ollama API-কে কল করে JSON উত্তর নিয়ে আসা
@@ -299,7 +389,7 @@ elif menu == "AI Alerts":
                         st.subheader("📊 Nationwide Epidemiological Summary")
                         st.info(ai_data.get("overall_summary", ""))
                         
-                        # Display hotspots as cards
+                        # Display hotspots as columns or cards
                         st.subheader("🚨 Active Outbreak Hotspots")
                         hotspots = ai_data.get("hotspots", [])
                         if not hotspots:
@@ -327,6 +417,38 @@ elif menu == "AI Alerts":
                         st.subheader("🛡️ Safety & Prevention Guidelines")
                         for rec in ai_data.get("safety_recommendations", []):
                             st.markdown(f"- {rec}")
+                            
+                        # Build a downloadable text report string
+                        report_text = f"""BIONODE-AI EPIDEMIOLOGICAL REPORT
+Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Timeframe: {"Last 30 Days (Fallback Overall)" if is_fallback else "Last 30 Days"}
+
+==================================================
+NATIONWIDE SUMMARY:
+{ai_data.get("overall_summary", "N/A")}
+
+==================================================
+ACTIVE HOTSPOTS:
+"""
+                        for hotspot in hotspots:
+                            loc = hotspot.get("location", "Unknown")
+                            disease = hotspot.get("disease", "Unknown")
+                            risk = hotspot.get("risk_level", "Low").upper()
+                            count = hotspot.get("case_count", 1)
+                            outlook = hotspot.get("spreading_outlook", "")
+                            report_text += f"\n- {loc}: RISK: {risk} | Cases: {count}\n  Disease: {disease}\n  Outlook: {outlook}\n"
+                            
+                        report_text += "\n==================================================\nSAFETY & PREVENTION RECOMMENDATIONS:\n"
+                        for idx, rec in enumerate(ai_data.get("safety_recommendations", []), 1):
+                            report_text += f"{idx}. {rec}\n"
+                            
+                        st.markdown("---")
+                        st.download_button(
+                            label="📥 Download Official Outbreak Report",
+                            data=report_text,
+                            file_name=f"BioNode_AI_Outbreak_Report_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            mime="text/plain"
+                        )
                             
                     except Exception as json_err:
                         # Fallback to plain text rendering if JSON parse fails
