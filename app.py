@@ -48,6 +48,66 @@ def get_time_threshold(filter_option):
     threshold = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     return threshold
 
+# Helper distance calculation
+def get_distance_km(lat1, lon1, lat2, lon2):
+    import math
+    R = 6371.0 # Earth radius in km
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+# Helper to map upazilas to coordinates
+@st.cache_data
+def get_upazila_coordinates_map():
+    up_coords = {}
+    GPS_DATA_PRESETS = {
+        "Barishal Sadar": {"lat": 22.7010, "lon": 90.3535},
+        "Bakerganj": {"lat": 22.5528, "lon": 90.3344},
+        "Babuganj": {"lat": 22.8333, "lon": 90.3000},
+        "Wazirpur": {"lat": 22.8167, "lon": 90.2333},
+        "Banaripara": {"lat": 22.7833, "lon": 90.1667},
+        "Agailjhara": {"lat": 22.9667, "lon": 90.1500},
+        "Gournadi": {"lat": 22.9736, "lon": 90.2264},
+        "Hizla": {"lat": 22.9000, "lon": 90.5167},
+        "Mehendiganj": {"lat": 22.8250, "lon": 90.5333},
+        "Muladi": {"lat": 22.9167, "lon": 90.4167}
+    }
+    for div in BD_HIERARCHY:
+        for dist in div["districts"]:
+            d_lat = dist["lat"]
+            d_lon = dist["lon"]
+            for up in dist["upazilas"]:
+                up_name = up["name"]
+                if up_name in GPS_DATA_PRESETS:
+                    up_coords[up_name] = GPS_DATA_PRESETS[up_name]
+                else:
+                    up_coords[up_name] = {"lat": d_lat, "lon": d_lon}
+    return up_coords
+
+# Helper to find neighboring upazilas within 30km
+def get_neighboring_upazilas(target_lat, target_lon, max_dist_km=30.0):
+    coords_map = get_upazila_coordinates_map()
+    neighbors = []
+    for name, coords in coords_map.items():
+        dist = get_distance_km(target_lat, target_lon, coords["lat"], coords["lon"])
+        if 0.1 < dist <= max_dist_km:
+            neighbors.append(f"{name} ({dist:.1f} km)")
+    return neighbors
+
+# Seasonal metadata helper
+def get_current_season_profile():
+    month = datetime.datetime.now().month
+    if month in [12, 1, 2]:
+        return "Winter/Dry Season (High risk of respiratory/influenza-like infections, cold-weather diarrhea)"
+    elif month in [3, 4, 5]:
+        return "Summer/Pre-Monsoon (High risk of heat stroke, water scarcity, diarrheal outbreaks/Cholera)"
+    elif month in [6, 7, 8, 9]:
+        return "Monsoon/Rainy Season (Extremely high risk of Dengue, Chikungunya, Typhoid, and waterborne diseases due to flooding/water-logging)"
+    else:
+        return "Post-Monsoon Transition (Moderate risk of Dengue and gastrointestinal infections)"
+
 # Pre-aggregate patient data for optimal LLM prompt structure
 def aggregate_data_for_ai(cases):
     if not cases:
@@ -58,7 +118,12 @@ def aggregate_data_for_ai(cases):
     now = datetime.datetime.now()
     threshold_15d = now - datetime.timedelta(days=15)
     
-    grouped = []
+    # Coordinates map
+    coords_map = get_upazila_coordinates_map()
+    
+    active_clusters = []
+    baseline_observations = []
+    
     for loc, group in df.groupby('location'):
         total_cases = len(group)
         symptom_counts = group['symptom'].value_counts().to_dict()
@@ -67,6 +132,7 @@ def aggregate_data_for_ai(cases):
         ages = pd.to_numeric(group['age'], errors='coerce').dropna()
         age_str = f"Avg Age: {int(ages.mean())} (Min: {int(ages.min())}, Max: {int(ages.max())})" if not ages.empty else "N/A"
         
+        # Calculate trend
         if 'dt' in group.columns and not group['dt'].isnull().all():
             recent_count = sum(group['dt'] >= threshold_15d)
             older_count = sum(group['dt'] < threshold_15d)
@@ -81,25 +147,58 @@ def aggregate_data_for_ai(cases):
         else:
             trend = "N/A"
             
-        grouped.append({
+        # Get coordinates for neighboring upazila calculation
+        loc_coords = coords_map.get(loc, None)
+        neighbors = []
+        if loc_coords:
+            neighbors = get_neighboring_upazilas(loc_coords["lat"], loc_coords["lon"])
+        
+        loc_data = {
             'location': loc,
             'total_cases': total_cases,
             'symptoms': symptom_str,
             'age_info': age_str,
-            'trend': trend
-        })
+            'trend': trend,
+            'neighbors': neighbors[:8] # Limit to top 8 closest neighbors to avoid token bloating
+        }
         
+        # Classify into clusters vs baseline based on case threshold (3 or more cases = Active Cluster)
+        if total_cases >= 3:
+            active_clusters.append(loc_data)
+        else:
+            baseline_observations.append(loc_data)
+            
     summary_lines = []
-    summary_lines.append(f"### Epidemiological Summary (Total Active Cases: {len(df)})\n")
-    for idx, item in enumerate(grouped, 1):
-        summary_lines.append(
-            f"**{idx}. Location: {item['location']}**\n"
-            f"   - Total Cases: {item['total_cases']}\n"
-            f"   - Active Symptoms: {item['symptoms']}\n"
-            f"   - Patient Demographics: {item['age_info']}\n"
-            f"   - 30-Day Trend Indicator: {item['trend']}\n"
-        )
-        
+    summary_lines.append(f"## SEASONAL CONTEXT")
+    summary_lines.append(f"Current Season: {get_current_season_profile()}\n")
+    
+    summary_lines.append(f"## ACTIVE OUTBREAK CLUSTERS (Threshold: >= 3 Cases)")
+    if not active_clusters:
+        summary_lines.append("No active outbreak clusters detected based on threshold.\n")
+    else:
+        for idx, item in enumerate(active_clusters, 1):
+            neighbors_str = ", ".join(item['neighbors']) if item['neighbors'] else "None"
+            summary_lines.append(
+                f"**{idx}. Location: {item['location']}**\n"
+                f"   - Case Count: {item['total_cases']}\n"
+                f"   - Mapped Symptoms: {item['symptoms']}\n"
+                f"   - Patient Demographics: {item['age_info']}\n"
+                f"   - Trend Indicator: {item['trend']}\n"
+                f"   - Adjacent Vulnerable Upazilas (within 30km): {neighbors_str}\n"
+            )
+            
+    summary_lines.append(f"## BASELINE SURVEILLANCE OBSERVATIONS (Threshold: 1-2 Cases - Normal Baseline)")
+    if not baseline_observations:
+        summary_lines.append("No baseline observations recorded.\n")
+    else:
+        for idx, item in enumerate(baseline_observations, 1):
+            summary_lines.append(
+                f"**{idx}. Location: {item['location']}**\n"
+                f"   - Case Count: {item['total_cases']}\n"
+                f"   - Symptoms logged: {item['symptoms']}\n"
+                f"   - Trend Indicator: {item['trend']}\n"
+            )
+            
     return "\n".join(summary_lines)
 
 st.sidebar.title("Navigation")
@@ -304,12 +403,12 @@ elif menu == "Strict Data Entry":
 
 # ৩. এআই অ্যালার্ট পেজ (Groq Cloud AI Version)
 elif menu == "AI Alerts":
-    st.title("🤖 BioNode AI - Live Outbreak Analysis")
+    st.title("🤖 BioNode AI - Predictive Outbreak Intelligence")
     st.markdown("---")
-    st.info("🧠 Analyzing live epidemiological data from the cloud using Llama-3 (Groq API)...")
+    st.info("🧠 Performing climate-informed predictive outbreak modeling and clinical triage using Llama-3...")
     
-    if st.button("Generate Live AI Alert"):
-        with st.spinner("BioNode AI is analyzing data..."):
+    if st.button("Generate Predictive AI Alert"):
+        with st.spinner("BioNode AI is executing predictive models..."):
             try:
                 # ১. ডেটাবেস থেকে ৩০ দিনের ডেটা আনা
                 threshold_30_days = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
@@ -340,7 +439,7 @@ elif menu == "AI Alerts":
                     # Pre-aggregate data in Python to present clean structured metrics to the AI
                     structured_summary = aggregate_data_for_ai(recent_cases)
                     
-                    with st.expander("📊 View Pre-Aggregated Database Statistics passed to AI"):
+                    with st.expander("📊 View Pre-Aggregated Database Statistics & Proximity Matrix"):
                         st.markdown(structured_summary)
                     
                     # ২. এআই-এর জন্য প্রম্পট (JSON রেসপন্স ফরম্যাটের নির্দেশনা) তৈরি
@@ -350,16 +449,34 @@ elif menu == "AI Alerts":
                     
                     {structured_summary}
                     
-                    Return a JSON object containing an epidemiological alert and risk assessment.
+                    Return a JSON object containing an epidemiological alert, risk assessment, and predictive forecasts.
                     The JSON must strictly match the following schema:
                     {{
                       "hotspots": [
                         {{
                           "location": "Name of Upazila/District",
-                          "disease": "Summarized disease/symptom (e.g. Dengue, Cholera, Influenza-like illness)",
+                          "disease": "Predicted Clinical Disease (e.g. Dengue, Cholera, Influenza-like illness, Measles). Map the raw symptoms to a target disease.",
+                          "mapped_symptoms": "Comma-separated raw symptoms that led to this disease mapping",
                           "risk_level": "High" or "Medium" or "Low",
                           "case_count": number_of_cases,
                           "spreading_outlook": "Short description of potential spread based on the Weekly Trend Indicator"
+                        }}
+                      ],
+                      "predictive_forecasts": [
+                        {{
+                          "vulnerable_location": "Name of adjacent Upazila/District at risk of transmission",
+                          "predicted_threat": "Predicted target disease (e.g. Dengue, Waterborne Diarrhea, Typhoid)",
+                          "transmission_vector": "E.g. Vector-borne (Mosquitoes), Water-runoff, or High local mobility",
+                          "spread_risk": "High" or "Medium" or "Low",
+                          "projection_days": 14,
+                          "action_plan": "Specific preventative instruction for local health officials"
+                        }}
+                      ],
+                      "irrelevant_cases_detected": [
+                        {{
+                          "location": "Location name",
+                          "raw_input": "The raw symptom input that was flagged as irrelevant",
+                          "reason": "Clear explanation of why it is irrelevant (e.g., physical injury, chronic non-infectious condition, or nonsense word)"
                         }}
                       ],
                       "overall_summary": "A professional 3-sentence summary of the active outbreak trends and threat level in the country based on the pre-aggregated weekly trends.",
@@ -369,11 +486,14 @@ elif menu == "AI Alerts":
                       ]
                     }}
                     
-                    Analyze the data over the timeframe provided. Focus on identifying disease clusters in the same location.
-                    Enforce strict epidemiological reasoning to assign risk levels:
-                    - HIGH RISK: Locations with Increasing trend, emerging new outbreaks of infectious symptoms, or large clusters (>=3 cases).
-                    - MEDIUM RISK: Stable clusters or moderate case counts.
-                    - LOW RISK: Decreasing trends or isolated single cases.
+                    CRITICAL INSTRUCTIONS:
+                    1. CLINICAL NOISE FILTER: Analyze all raw symptom logs. If any inputs are non-infectious conditions (e.g. broken bone, fracture, cut, physical injury, chronic conditions) or nonsense terms, do NOT count them towards hotspots or outbreaks. List them in "irrelevant_cases_detected".
+                    2. OUTBREAK THRESHOLD: Differentiate between baseline surveillance and active clusters.
+                       - Locations listed under ACTIVE OUTBREAK CLUSTERS (having >=3 cases) should be assessed for hotspots.
+                       - Locations listed under BASELINE SURVEILLANCE OBSERVATIONS (having 1-2 cases) represent normal fluctuations. Categorize them as Low Risk and do not create active alerts for them unless they contain highly contagious symptoms (e.g., acute watery diarrhea/cholera or red rash/measles).
+                    3. SYMPTOM MAPPING: Map symptom clusters to actual target diseases (e.g., Fever + Joint Pain + Headache -> Dengue; Watery Stool + Vomiting -> Cholera/Diarrheal outbreak).
+                    4. TRANSMISSION FORECASTING: Analyze "Adjacent Vulnerable Upazilas" near active clusters. Propose potential transmission pathways and rate their vulnerability (spread_risk) based on distance and proximity to the source cluster.
+                    5. SEASONAL ANALYSIS: Use the provided SEASONAL CONTEXT to inform your projections.
                     """
                     
                     # ৩. Groq API-কে কল করে JSON উত্তর নিয়ে আসা
@@ -392,7 +512,7 @@ elif menu == "AI Alerts":
                         st.subheader("📊 Nationwide Epidemiological Summary")
                         st.info(ai_data.get("overall_summary", ""))
                         
-                        # Display hotspots as columns or cards
+                        # Display hotspots
                         st.subheader("🚨 Active Outbreak Hotspots")
                         hotspots = ai_data.get("hotspots", [])
                         if not hotspots:
@@ -401,6 +521,7 @@ elif menu == "AI Alerts":
                             for hotspot in hotspots:
                                 loc = hotspot.get("location", "Unknown")
                                 disease = hotspot.get("disease", "Unknown")
+                                symptoms = hotspot.get("mapped_symptoms", "Unknown")
                                 risk = hotspot.get("risk_level", "Low").title()
                                 count = hotspot.get("case_count", 1)
                                 outlook = hotspot.get("spreading_outlook", "")
@@ -413,16 +534,51 @@ elif menu == "AI Alerts":
                                 else:
                                     st.success(f"🟢 **{loc}** — Risk Level: **{risk}** ({count} Cases)")
                                 
-                                st.write(f"**Disease/Cluster:** {disease} | **Spread Outlook:** {outlook}")
+                                st.write(f"**Mapped Disease:** {disease} | **Symptoms:** {symptoms}")
+                                st.write(f"**Spread Outlook:** {outlook}")
+                                st.markdown("---")
+                                
+                        # Display Predictive transmission risk
+                        st.subheader("🔮 Geospatial Spread & Proximity Forecasts")
+                        predictions = ai_data.get("predictive_forecasts", [])
+                        if not predictions:
+                            st.success("No adjacent geographical spread threats predicted.")
+                        else:
+                            for pred in predictions:
+                                target_loc = pred.get("vulnerable_location", "Unknown")
+                                threat = pred.get("predicted_threat", "Unknown")
+                                vector = pred.get("transmission_vector", "Unknown")
+                                s_risk = pred.get("spread_risk", "Low").title()
+                                plan = pred.get("action_plan", "")
+                                
+                                if s_risk == "High":
+                                    st.error(f"⚠️ **Vulnerable Area: {target_loc}** — Transmission Risk: **{s_risk}**")
+                                elif s_risk == "Medium":
+                                    st.warning(f"⚠️ **Vulnerable Area: {target_loc}** — Transmission Risk: **{s_risk}**")
+                                else:
+                                    st.info(f"ℹ️ **Vulnerable Area: {target_loc}** — Transmission Risk: **{s_risk}**")
+                                    
+                                st.write(f"**Predicted Threat:** {threat} | **Transmission Route:** {vector}")
+                                st.write(f"**Preventative Plan:** *{plan}*")
                                 st.markdown("---")
                         
+                        # Display Excluded Clinical Noise Logs
+                        irrelevant_logs = ai_data.get("irrelevant_cases_detected", [])
+                        if irrelevant_logs:
+                            with st.expander("🛡️ Filtered Excluded Records (Clinical Triage Noise)"):
+                                for item in irrelevant_logs:
+                                    st.markdown(
+                                        f"- **Location:** {item.get('location')} | **Input:** `\"{item.get('raw_input')}\"`\n"
+                                        f"  *Reason Excluded:* {item.get('reason')}"
+                                    )
+                                    
                         # Display Recommendations
                         st.subheader("🛡️ Safety & Prevention Guidelines")
                         for rec in ai_data.get("safety_recommendations", []):
                             st.markdown(f"- {rec}")
                             
                         # Build a downloadable text report string
-                        report_text = f"""BIONODE-AI EPIDEMIOLOGICAL REPORT
+                        report_text = f"""BIONODE-AI PREDICTIVE EPIDEMIOLOGICAL REPORT
 Generated: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 Timeframe: {"Last 30 Days (Fallback Overall)" if is_fallback else "Last 30 Days"}
 
@@ -439,7 +595,21 @@ ACTIVE HOTSPOTS:
                             risk = hotspot.get("risk_level", "Low").upper()
                             count = hotspot.get("case_count", 1)
                             outlook = hotspot.get("spreading_outlook", "")
-                            report_text += f"\n- {loc}: RISK: {risk} | Cases: {count}\n  Disease: {disease}\n  Outlook: {outlook}\n"
+                            report_text += f"\n- {loc}: RISK: {risk} | Cases: {count}\n  Mapped Disease: {disease}\n  Outlook: {outlook}\n"
+                            
+                        report_text += "\n==================================================\nGEOSPATIAL TRANSMISSION PROJECTIONS:\n"
+                        for pred in predictions:
+                            target_loc = pred.get("vulnerable_location", "Unknown")
+                            threat = pred.get("predicted_threat", "Unknown")
+                            s_risk = pred.get("spread_risk", "Low").upper()
+                            vector = pred.get("transmission_vector", "Unknown")
+                            plan = pred.get("action_plan", "")
+                            report_text += f"\n- Vulnerable: {target_loc} | Risk: {s_risk}\n  Threat: {threat}\n  Route: {vector}\n  Plan: {plan}\n"
+                            
+                        if irrelevant_logs:
+                            report_text += "\n==================================================\nFILTERED CLINICAL TRIAGE NOISE (EXCLUDED):\n"
+                            for item in irrelevant_logs:
+                                report_text += f"- Loc: {item.get('location')} | Input: \"{item.get('raw_input')}\" | Reason: {item.get('reason')}\n"
                             
                         report_text += "\n==================================================\nSAFETY & PREVENTION RECOMMENDATIONS:\n"
                         for idx, rec in enumerate(ai_data.get("safety_recommendations", []), 1):
