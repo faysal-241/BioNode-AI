@@ -201,12 +201,14 @@ def aggregate_data_for_ai(cases):
 st.sidebar.title("Navigation")
 menu = st.sidebar.radio("", ["Dashboard", "Strict Data Entry", "AI Alerts"])
 
-# Time filter only for Dashboard
+# Filters only for Dashboard
 time_filter = "All Time"
+severity_filter = "All Active Zones (1+ cases)"
 if menu == "Dashboard":
     st.sidebar.markdown("---")
     st.sidebar.subheader("Filters")
     time_filter = st.sidebar.selectbox("Select Time Range", ["All Time", "Last 7 Days", "Last 14 Days", "Last 30 Days"])
+    severity_filter = st.sidebar.selectbox("Outbreak Severity Zone", ["All Active Zones (1+ cases)", "Risk Zones (2 cases)", "Alert Zones (3+ cases)"])
 
 # ১. মেইন ড্যাশবোর্ড
 if menu == "Dashboard":
@@ -257,26 +259,43 @@ if menu == "Dashboard":
                 location_counts = map_data['location'].value_counts().to_dict()
                 map_data_grouped['case_count'] = map_data_grouped['location'].map(location_counts)
                 
-                st.subheader("🔥 Live Geospatial Infection Heatmap")
-                mean_lat = map_data_grouped['lat'].mean()
-                mean_lon = map_data_grouped['lon'].mean()
-                lat_span = map_data_grouped['lat'].max() - map_data_grouped['lat'].min()
-                lon_span = map_data_grouped['lon'].max() - map_data_grouped['lon'].min()
-                zoom_level = 6.2 if (lat_span > 1.5 or lon_span > 1.5) else 8.5
+                # Apply severity filtering
+                if severity_filter == "Risk Zones (2 cases)":
+                    map_data_grouped = map_data_grouped[map_data_grouped['case_count'] == 2]
+                elif severity_filter == "Alert Zones (3+ cases)":
+                    map_data_grouped = map_data_grouped[map_data_grouped['case_count'] >= 3]
                 
-                fig = px.density_mapbox(
-                    map_data_grouped, lat='lat', lon='lon', z='case_count', radius=40, 
-                    center=dict(lat=mean_lat, lon=mean_lon), zoom=zoom_level, 
-                    mapbox_style="carto-darkmatter", color_continuous_scale="YlOrRd", 
-                    hover_name="location", hover_data={"lat": False, "lon": False, "symptom": True, "case_count": True}
-                )
-                fig.update_layout(height=650, margin={"r":0,"t":0,"l":0,"b":0}, coloraxis_showscale=False)
-                st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+                if not map_data_grouped.empty:
+                    st.subheader(f"🔥 Geospatial Infection Heatmap — {severity_filter}")
+                    mean_lat = map_data_grouped['lat'].mean()
+                    mean_lon = map_data_grouped['lon'].mean()
+                    lat_span = map_data_grouped['lat'].max() - map_data_grouped['lat'].min()
+                    lon_span = map_data_grouped['lon'].max() - map_data_grouped['lon'].min()
+                    zoom_level = 6.2 if (lat_span > 1.5 or lon_span > 1.5) else 8.5
+                    
+                    fig = px.density_mapbox(
+                        map_data_grouped, lat='lat', lon='lon', z='case_count', radius=40, 
+                        center=dict(lat=mean_lat, lon=mean_lon), zoom=zoom_level, 
+                        mapbox_style="carto-darkmatter", color_continuous_scale="YlOrRd", 
+                        hover_name="location", hover_data={"lat": False, "lon": False, "symptom": True, "case_count": True}
+                    )
+                    fig.update_layout(height=650, margin={"r":0,"t":0,"l":0,"b":0}, coloraxis_showscale=False)
+                    st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True})
+                else:
+                    st.info(f"ℹ️ No locations match the selected Outbreak Severity: {severity_filter}")
                 
                 # Add Active Outbreaks Table / Hotline Metrics
                 st.markdown("---")
-                st.subheader("📍 Active Outbreak Hotspots")
-                hotspot_df = map_data_grouped[map_data_grouped['case_count'] >= 2].sort_values(by='case_count', ascending=False)
+                if severity_filter == "Risk Zones (2 cases)":
+                    st.subheader("📍 Active Risk Zones (2 Cases)")
+                    hotspot_df = map_data_grouped.sort_values(by='case_count', ascending=False)
+                elif severity_filter == "Alert Zones (3+ cases)":
+                    st.subheader("📍 Active Alert Zones (3+ Cases)")
+                    hotspot_df = map_data_grouped.sort_values(by='case_count', ascending=False)
+                else:
+                    st.subheader("📍 Active Outbreak Hotspots (>= 2 Cases)")
+                    hotspot_df = map_data_grouped[map_data_grouped['case_count'] >= 2].sort_values(by='case_count', ascending=False)
+                    
                 if not hotspot_df.empty:
                     display_df = hotspot_df[['location', 'case_count', 'symptom']].rename(columns={
                         'location': 'Location (Upazila)',
@@ -285,7 +304,7 @@ if menu == "Dashboard":
                     })
                     st.dataframe(display_df, use_container_width=True, hide_index=True)
                 else:
-                    st.success("✅ No active high-risk hotspots (locations with 2 or more cases) in this timeframe.")
+                    st.success("✅ No active locations matching the criteria in this timeframe.")
             else:
                 st.info("🗺️ No map data available yet for the selected timeframe.")
                 
@@ -298,10 +317,34 @@ elif menu == "Strict Data Entry":
     st.title("📝 Secure Clinical Data Entry")
     st.markdown("---")
     
+    # Render temporary success message if set
+    if "success_message" in st.session_state and st.session_state.success_message:
+        st.success(st.session_state.success_message)
+        st.session_state.success_message = ""
+        
     st.info("💡 **Operator Input:** Select the map location step-by-step and enter patient details.")
     
+    # Reset input fields if flag is set (must be done before widgets are rendered)
+    if "should_reset" in st.session_state and st.session_state.should_reset:
+        st.session_state.patient_symptom = ""
+        st.session_state.selected_division = "Select Division..."
+        st.session_state.patient_age = 30
+        if "selected_district" in st.session_state:
+            st.session_state.selected_district = "Select District..."
+        if "selected_upazila" in st.session_state:
+            st.session_state.selected_upazila = "Select Area..."
+        st.session_state.should_reset = False
+
+    # Initialize keys if not in state
+    if "patient_age" not in st.session_state:
+        st.session_state.patient_age = 30
+    if "patient_symptom" not in st.session_state:
+        st.session_state.patient_symptom = ""
+    if "selected_division" not in st.session_state:
+        st.session_state.selected_division = "Select Division..."
+        
     st.subheader("1. Patient Age")
-    patient_age = st.number_input("Select Age", min_value=1, max_value=120, step=1)
+    patient_age = st.number_input("Select Age", min_value=1, max_value=120, step=1, key="patient_age")
     
     st.markdown("---")
     st.subheader("2. Map Location (Deep Filtering)")
@@ -313,17 +356,17 @@ elif menu == "Strict Data Entry":
     patient_lon = None
     
     divisions_list = ["Select Division..."] + [div["name"] for div in BD_HIERARCHY]
-    selected_division = st.selectbox("Division", divisions_list)
+    selected_division = st.selectbox("Division", divisions_list, key="selected_division")
     
     if selected_division != "Select Division...":
         div_data = next(div for div in BD_HIERARCHY if div["name"] == selected_division)
         districts_list = ["Select District..."] + [dist["name"] for dist in div_data["districts"]]
-        selected_district = st.selectbox("District", districts_list)
+        selected_district = st.selectbox("District", districts_list, key="selected_district")
         
         if selected_district != "Select District...":
             dist_data = next(dist for dist in div_data["districts"] if dist["name"] == selected_district)
             upazilas_list = ["Select Area..."] + [up["name"] for up in dist_data["upazilas"]]
-            selected_upazila = st.selectbox("Upazila / Area", upazilas_list)
+            selected_upazila = st.selectbox("Upazila / Area", upazilas_list, key="selected_upazila")
             
             if selected_upazila != "Select Area...":
                 patient_location = selected_upazila
@@ -354,7 +397,7 @@ elif menu == "Strict Data Entry":
             
     st.markdown("---")
     st.subheader("3. Clinical Symptoms")
-    patient_symptom = st.text_input("Enter Symptoms or Disease (e.g., Fever, Red rash)")
+    patient_symptom = st.text_input("Enter Symptoms or Disease (e.g., Fever, Red rash)", key="patient_symptom")
     
     if st.button("Validate & Save to Cloud"):
         errors = []
@@ -393,7 +436,11 @@ elif menu == "Strict Data Entry":
                             lat=patient_lat, lon=patient_lon, time=current_time
                         )
                     driver.close()
-                    st.success(f"✅ Data for {patient_location} ({selected_district}, {selected_division}) successfully verified and saved!")
+                    
+                    # Set the flag to reset values on next rerun
+                    st.session_state.should_reset = True
+                    st.session_state.success_message = f"✅ Data for {patient_location} ({selected_district}, {selected_division}) successfully verified and saved!"
+                    st.rerun()
                 except Exception as e:
                     st.error("❌ Database connection error.")
                     st.write(e)
